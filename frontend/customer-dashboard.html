@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Dashboard</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+
+        .card {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- NAVBAR -->
+    <div style="background:#f0f0f0;padding:10px;border-bottom:1px solid #ccc;">
+        <button onclick="viewAllOrders()">View Orders</button>
+        <button onclick="logout()" style="float:right;">Logout</button>
+        <span id="userInfo"></span>
+    </div>
+
+    <!-- RESTAURANTS -->
+    <div id="restaurantsSection">
+        <h2>Available Restaurants</h2>
+        <div id="restaurantsList"></div>
+    </div>
+
+    <!-- RESTAURANT DETAILS -->
+    <div id="restaurantDetailsSection" style="display:none;">
+        <h2 id="restaurantName"></h2>
+        <button onclick="backToRestaurants()">Back</button>
+
+        <h3>Menu</h3>
+        <div id="menuItemsList"></div>
+
+        <h3>Create Order</h3>
+        <table id="orderedItemsTable" border="1" width="100%">
+            <tr>
+                <th>Item</th>
+                <th>Price</th>
+                <th>Qty</th>
+                <th>Action</th>
+            </tr>
+        </table>
+
+        <h4>Payment</h4>
+        <select id="cardType">
+            <option value="DEBIT">DEBIT</option>
+            <option value="CREDIT">CREDIT</option>
+        </select><br><br>
+
+        <input id="cardNumber" placeholder="Card Number"><br><br>
+        <input id="cardCVV" placeholder="CVV"><br><br>
+
+        <button onclick="placeOrder()">Place Order</button>
+        <div id="orderMessage"></div>
+    </div>
+
+    <!-- ORDERS -->
+    <div id="ordersTableSection" style="display:none;">
+        <h2>Your Orders</h2>
+        <button onclick="backToRestaurants()">Back</button>
+        <table id="ordersTable" border="1" width="100%">
+            <tr>
+                <th>ID</th>
+                <th>Status</th>
+                <th>Total</th>
+                <th>Items</th>
+                <th>Action</th>
+            </tr>
+        </table>
+    </div>
+
+    <!-- NOTIFICATION -->
+    <div id="notificationArea" style="display:none;position:fixed;top:20px;right:20px;width:300px;
+     background:#f0f0f0;border:1px solid #ccc;padding:10px;">
+        <h4>Notification</h4>
+        <div id="notificationContent"></div>
+        <button onclick="closeNotification()">Close</button>
+    </div>
+
+    <script>
+        /* ================= CONSTANTS ================= */
+        const API = "http://localhost:8765/api/v1";
+        const TOKEN_KEY = "jwtToken";
+        const USER_EMAIL_KEY = "userEmail";
+        const USER_ROLE_KEY = "userRole";
+        const USER_ID_KEY = "userId";
+
+        /* ================= STATE ================= */
+        let customerId = null;
+        let customerEmail = null;
+        let stompClient = null;
+        let selectedRestaurantId = null;
+        let selectedItems = {};
+
+        /* ================= INIT ================= */
+        window.onload = init;
+
+        async function init() {
+            const token = sessionStorage.getItem(TOKEN_KEY);
+            const role = sessionStorage.getItem(USER_ROLE_KEY);
+            customerEmail = sessionStorage.getItem(USER_EMAIL_KEY);
+
+            if (!token || role !== "CUSTOMER") {
+                redirectToLogin();
+                return;
+            }
+
+            document.getElementById("userInfo").innerText = `Logged in as ${customerEmail}`;
+
+            await loadCustomerId();
+            initWebSocket();
+            loadRestaurants();
+        }
+
+        /* ================= API ================= */
+        async function apiCall(url, method = "GET", body) {
+            const token = sessionStorage.getItem(TOKEN_KEY);
+            const res = await fetch(url, {
+                method,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: body ? JSON.stringify(body) : null
+            });
+
+            if (res.ok) {
+                const contentType = res.headers.get('content-type');
+                const text = await res.text();
+                if (contentType && contentType.includes('application/json')) {
+                    return text ? JSON.parse(text) : null;
+                }
+                return text;
+            } else {
+                const text = await res.text();
+                let errorData = { message: 'API error' };
+                try {
+                    if (text) errorData = JSON.parse(text);
+                } catch (e) { }
+                throw new Error(errorData.message || "API error");
+            }
+        }
+
+        async function loadCustomerId() {
+            const data = await apiCall(`${API}/user/getuserid/${customerEmail}`);
+            // API returns a plain number (e.g., 1), not an object
+            customerId = (typeof data === 'object') ? (data.id || data.userId) : data;
+            sessionStorage.setItem(USER_ID_KEY, customerId);
+        }
+
+        /* ================= WEBSOCKET ================= */
+        function initWebSocket() {
+            const socket = new SockJS("http://localhost:8765/ws");
+            stompClient = Stomp.over(socket);
+            stompClient.debug = null;
+
+            stompClient.connect({}, () => {
+                console.log("WebSocket connected");
+
+                stompClient.subscribe("/topic/customer/", msg => {
+                    const n = JSON.parse(msg.body);
+                    if (n.customerId == customerId) {
+                        showNotification(n);
+                        updateOrderInTable(n);
+                    }
+                });
+            }, err => {
+                console.error("WebSocket error", err);
+            });
+        }
+
+        /* ================= UI ================= */
+        function updateOrderInTable(n) {
+            const table = document.getElementById("ordersTable");
+            const oId = n.orderId || n.id;
+
+            // Check if row exists
+            let row = null;
+            for (let i = 1; i < table.rows.length; i++) {
+                if (table.rows[i].cells[0].innerText == oId) {
+                    row = table.rows[i];
+                    break;
+                }
+            }
+
+            if (!row) {
+                // If order isn't in table, and we are on the orders section, add it
+                if (document.getElementById("ordersTableSection").style.display === "block") {
+                    // Refresh completely to ensure correct sorting/content
+                    viewAllOrders();
+                }
+                return;
+            }
+
+            // Update row cells
+            // Use n.paymentStatus if available, otherwise fallback to derived logic
+            const paymentStatus = n.paymentStatus || ((n.status === 'CANCELLED') ? 'REFUNDED/CANCELLED' : 'PAID');
+            const itemsList = n.orderItemList ? n.orderItemList.map(i => `${i.itemName} (x${i.quantity})`).join(", ") : "";
+
+            // Cancel Button (only if not cancelled/delivered)
+            let actionBtn = "-";
+            if (n.status === 'CREATED' || n.status === 'PREPARED') {
+                actionBtn = `<button onclick="cancelOrder(${oId})">Cancel</button>`;
+            }
+
+            row.cells[2].innerText = n.status;
+            row.cells[5].innerText = paymentStatus;
+            const assignedDriver = n.driverEmail || (n.driverName || (n.driver ? n.driver.email : 'Pending'));
+            row.cells[6].innerText = assignedDriver;
+            row.cells[7].innerText = itemsList;
+            row.cells[8].innerHTML = actionBtn;
+        }
+
+        function showNotification(n) {
+            if (n.customerId && n.customerId != customerId) return; // double check loose equality
+
+            const box = document.getElementById("notificationArea");
+
+            let itemsHtml = "";
+            if (n.orderItemList && n.orderItemList.length > 0) {
+                itemsHtml = "<ul>" + n.orderItemList.map(i => `<li>${i.itemName} x ${i.quantity}</li>`).join("") + "</ul>";
+            }
+
+            let content = `
+                <strong>Order #${n.orderId}</strong><br>
+                Status: ${n.status}<br>
+                Customer ID: ${n.customerId}<br>
+                Restaurant ID: ${n.restaurantId}<br>
+                Amount: $${n.amount}<br>
+                Payment: ${n.paymentStatus || 'N/A'}<br>
+                ${itemsHtml}
+            `;
+
+            if (n.driverEmail) {
+                content += `<br>Driver: ${n.driverEmail}`;
+            }
+
+            document.getElementById("notificationContent").innerHTML = content;
+            box.style.display = "block";
+        }
+
+        function closeNotification() {
+            document.getElementById("notificationArea").style.display = "none";
+        }
+
+        /* ================= RESTAURANTS ================= */
+        async function loadRestaurants() {
+            const data = await apiCall(`${API}/user/restaurant/getallrestaurantinfo`);
+            const list = document.getElementById("restaurantsList");
+            list.innerHTML = "";
+
+            data.forEach(r => {
+                list.innerHTML += `
+            <div class="card">
+                <h3>${r.restaurantName}</h3>
+                <button onclick="selectRestaurant(${r.id})">View Menu</button>
+            </div>`;
+            });
+        }
+
+        async function selectRestaurant(id) {
+            selectedRestaurantId = id;
+            selectedItems = {};
+
+            const r = await apiCall(`${API}/user/restaurantinfo/${id}`);
+            document.getElementById("restaurantsSection").style.display = "none";
+            document.getElementById("restaurantDetailsSection").style.display = "block";
+            document.getElementById("restaurantName").innerText = r.restaurantName;
+
+            const menu = document.getElementById("menuItemsList");
+            menu.innerHTML = "";
+
+            r.orderItems.forEach(i => {
+                menu.innerHTML += `
+            <div class="card">
+                ${i.itemName} - $${i.price}
+                <input type="number" min="0" value="0"
+                    onchange="updateItem(${i.menuItemId},'${i.itemName}',${i.price},this.value)">
+            </div>`;
+            });
+        }
+
+        function updateItem(id, name, price, qty) {
+            qty = parseInt(qty);
+            if (qty > 0) selectedItems[id] = { id, name, price, qty };
+            else delete selectedItems[id];
+            renderOrderTable();
+        }
+
+        function renderOrderTable() {
+            const table = document.getElementById("orderedItemsTable");
+            while (table.rows.length > 1) table.deleteRow(1);
+
+            Object.values(selectedItems).forEach(i => {
+                const r = table.insertRow();
+                r.innerHTML = `<td>${i.name}</td><td>$${i.price}</td><td>${i.qty}</td><td>-</td>`;
+            });
+        }
+
+        /* ================= ORDER ================= */
+        async function placeOrder() {
+            if (!Object.keys(selectedItems).length) return alert("No items selected");
+
+            const cardType = document.getElementById("cardType").value;
+            const cardNumber = document.getElementById("cardNumber").value;
+            const cardCVV = document.getElementById("cardCVV").value;
+
+            if (!cardNumber || !cardCVV) return alert("Please enter card details");
+
+            try {
+                await apiCall(`${API}/user/order`, "POST", {
+                    customerId,
+                    restaurantId: selectedRestaurantId,
+                    items: Object.values(selectedItems).map(i => ({
+                        menuItemId: i.id,
+                        itemName: i.name,
+                        quantity: i.qty,
+                        price: i.price
+                    })),
+                    card: {
+                        cardNumber,
+                        cardCvv: cardCVV,
+                        cardType
+                    }
+                });
+
+                alert("Order placed!");
+                viewAllOrders();
+            } catch (e) {
+                console.error("Order failed", e);
+                alert("Failed to place order: " + e.message);
+            }
+        }
+
+        async function viewAllOrders() {
+            const data = await apiCall(`${API}/user/allorder/${customerId}`); // Corrected Path
+            document.getElementById("restaurantsSection").style.display = "none";
+            document.getElementById("restaurantDetailsSection").style.display = "none";
+            document.getElementById("ordersTableSection").style.display = "block";
+
+            const table = document.getElementById("ordersTable");
+            // Clear existing rows
+            while (table.rows.length > 0) table.deleteRow(0);
+
+            // Add Header
+            const header = table.insertRow();
+            header.innerHTML = `
+            <th>Order ID</th>
+            <th>Customer ID</th>
+            <th>Status</th>
+            <th>Rest. ID</th>
+            <th>Total</th>
+            <th>Payment</th>
+            <th>Driver</th>
+            <th>Items</th>
+            <th>Action</th>`;
+
+            data.forEach(o => {
+                const row = table.insertRow();
+                // Derive Payment Status if missing in API response
+                const paymentStatus = o.paymentStatus || ((o.status === 'CANCELLED') ? 'REFUNDED/CANCELLED' : 'PAID');
+
+                // Format Items
+                const itemsList = (o.items && Array.isArray(o.items)) ? o.items.map(i => `${i.itemName} (x${i.quantity})`).join(", ") : "";
+
+                // Cancel Button (only if not cancelled/delivered)
+                let actionBtn = "-";
+                if (o.status === 'CREATED' || o.status === 'PREPARED') {
+                    actionBtn = `<button onclick="cancelOrder(${o.id})">Cancel</button>`;
+                }
+
+                const assignedDriver = o.driverEmail || (o.driverName || (o.driver ? o.driver.email : 'Pending'));
+                row.innerHTML = `
+                <td>${o.id}</td>
+                <td>${o.customerId}</td>
+                <td>${o.status}</td>
+                <td>${o.restaurantId}</td>
+                <td>$${o.totalAmount}</td>
+                <td>${paymentStatus}</td>
+                <td>${assignedDriver}</td>
+                <td>${itemsList}</td>
+                <td>${actionBtn}</td>`;
+            });
+        }
+
+        async function cancelOrder(orderId) {
+            if (!confirm("Are you sure you want to cancel Order #" + orderId + "?")) return;
+            try {
+                await apiCall(`${API}/user/orders/cancel/${orderId}`);
+                alert("Order Cancelled!");
+                viewAllOrders(); // Refresh table
+            } catch (e) {
+                console.error(e);
+                alert("Failed to cancel order: " + e.message);
+            }
+        }
+
+        function backToRestaurants() {
+            document.getElementById("restaurantsSection").style.display = "block";
+            document.getElementById("restaurantDetailsSection").style.display = "none";
+            document.getElementById("ordersTableSection").style.display = "none";
+        }
+
+        /* ================= AUTH ================= */
+        function logout() {
+            sessionStorage.clear();
+            if (stompClient) stompClient.disconnect();
+            window.location.href = "index.html";
+        }
+
+        function redirectToLogin() {
+            sessionStorage.clear();
+            window.location.href = "index.html";
+        }
+    </script>
+</body>
+
+</html>

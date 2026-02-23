@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Restaurant Owner Dashboard - Multi-Vendor Delivery System</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+</head>
+
+<body>
+    <!-- Navigation -->
+    <div id="navbar" style="background-color: #f0f0f0; padding: 10px; border-bottom: 1px solid #ccc;">
+        <span id="displayRestaurantName" style="font-size: 1.2em; font-weight: bold; margin-right: 20px;"></span>
+        <button onclick="viewOrders()" style="margin-right: 10px;">View All Orders</button>
+        <button onclick="showSettings()" style="margin-right: 10px;">Settings</button>
+        <button onclick="logout()" style="float: right;">Logout</button>
+        <span id="userInfo"></span>
+    </div>
+
+    <!-- Main Container -->
+    <div id="mainContent">
+        <!-- Settings Section -->
+        <div id="settingsSection" style="display:none;">
+            <h2>Restaurant Settings</h2>
+            <label>Restaurant Name:</label>
+            <input type="text" id="restaurantName"><br><br>
+
+            <button onclick="updateRestaurantName()">Update Restaurant Name</button>
+            <div id="settingsMessage"></div>
+            <hr>
+
+            <h3>Add Menu Items</h3>
+            <label>Menu Item ID:</label>
+            <input type="number" id="menuItemId" min="1"><br><br>
+
+            <label>Item Name:</label>
+            <input type="text" id="itemName"><br><br>
+
+            <label>Price:</label>
+            <input type="number" id="itemPrice" min="0" step="0.01"><br><br>
+
+            <button onclick="addMenuItem()">Add Item</button>
+            <div id="itemMessage"></div>
+
+            <h3>Current Items</h3>
+            <table id="itemsTable" border="1" style="width:100%; margin-top: 10px;">
+                <thead>
+                    <tr>
+                        <th>Menu Item ID</th>
+                        <th>Item Name</th>
+                        <th>Price</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="currentItemsBody"></tbody>
+            </table>
+        </div>
+
+        <!-- Orders Section -->
+        <div id="ordersSection" style="display:none;">
+            <h2>All Orders</h2>
+            <button onclick="showSettings()">Back to Settings</button>
+            <table id="ordersTable" border="1" style="width:100%; margin-top: 20px;">
+                <tr>
+                    <th>Order ID</th>
+                    <th>Customer ID</th>
+                    <th>Status</th>
+                    <th>Total Amount</th>
+                    <th>Items</th>
+                    <th>Action</th>
+                </tr>
+            </table>
+            <div id="ordersMessage"></div>
+        </div>
+    </div>
+
+    <!-- Notification Area -->
+    <div id="notificationArea"
+        style="position: fixed; top: 20px; right: 20px; width: 300px; background-color: #f0f0f0; border: 1px solid #ccc; padding: 10px; border-radius: 5px; display:none; z-index: 1000;">
+        <h4>Notification</h4>
+        <div id="notificationContent"></div>
+        <button onclick="closeNotification()" style="margin-top: 10px;">Close</button>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8765/api/v1';
+        const TOKEN_KEY = 'jwtToken';
+        const REFRESH_TOKEN_KEY = 'refreshToken';
+        const USER_EMAIL_KEY = 'userEmail';
+        const USER_ROLE_KEY = 'userRole';
+        const OWNER_ID_KEY = 'ownerId';
+        const RESTAURANT_ID_KEY = 'restaurantId';
+
+        let ownerEmail = null;
+        let ownerId = null;
+        let restaurantId = null;
+        let stompClient = null;
+
+        // Initialize on page load
+        window.addEventListener('load', function () {
+            checkTokenAndInitialize();
+        });
+
+        // Check token and initialize dashboard
+        function checkTokenAndInitialize() {
+            const token = sessionStorage.getItem(TOKEN_KEY);
+            const userRole = sessionStorage.getItem(USER_ROLE_KEY);
+            ownerEmail = sessionStorage.getItem(USER_EMAIL_KEY);
+
+            if (!token || userRole !== 'RESTAURANT_OWNER') {
+                redirectToLogin();
+                return;
+            }
+
+            document.getElementById('userInfo').textContent = `Logged in as: ${ownerEmail}`;
+
+            // Get owner ID
+            getOwnerId();
+
+            // Initialize WebSocket for notifications
+            initializeWebSocket();
+        }
+
+        // Get owner ID from API
+        async function getOwnerId() {
+            try {
+                const response = await apiCall(`${API_BASE_URL}/owner/getuserid/${ownerEmail}`, 'GET');
+                if (response !== null && response !== undefined) {
+                    ownerId = (typeof response === 'object') ? (response.id || response.userId) : response;
+                    sessionStorage.setItem(OWNER_ID_KEY, ownerId);
+
+                    // Get restaurant ID
+                    getRestaurantId();
+
+                    // Show settings section by default
+                    showSettings();
+                }
+            } catch (error) {
+                alert(`Error getting owner ID: ${error.message}`);
+            }
+        }
+
+        // Get restaurant ID from API
+        async function getRestaurantId() {
+            try {
+                const response = await apiCall(`${API_BASE_URL}/owner/getrestaurantid/${ownerEmail}`, 'GET');
+                if (response !== null && response !== undefined) {
+                    restaurantId = (typeof response === 'object') ? (response.restaurantId || response.id) : response;
+                    sessionStorage.setItem(RESTAURANT_ID_KEY, restaurantId);
+
+                    // Load current restaurant name and items
+                    loadRestaurantInfo();
+                }
+            } catch (error) {
+                alert(`Error getting restaurant ID: ${error.message}`);
+            }
+        }
+
+        // Load restaurant info
+        async function loadRestaurantInfo() {
+            if (!restaurantId) return;
+            try {
+                const response = await apiCall(`${API_BASE_URL}/owner/getrestaurantinfo/${restaurantId}`, 'GET');
+                if (response) {
+                    const rName = response.restaurantName;
+                    const nameHeader = document.getElementById('displayRestaurantName');
+                    const settingsNameInput = document.getElementById('restaurantName');
+
+                    if (rName && rName !== "Restaurant Name") {
+                        nameHeader.textContent = rName;
+                        nameHeader.style.color = "black";
+                        settingsNameInput.value = rName;
+                    } else {
+                        nameHeader.textContent = "Please set your Restaurant Name!";
+                        nameHeader.style.color = "red";
+                        settingsNameInput.value = "";
+                    }
+
+                    if (response.orderItems && Array.isArray(response.orderItems)) {
+                        const tableBody = document.getElementById('currentItemsBody');
+                        tableBody.innerHTML = response.orderItems.map(i => `
+                            <tr>
+                                <td>${i.menuItemId}</td>
+                                <td>${i.itemName}</td>
+                                <td>$${i.price}</td>
+                                <td><button onclick="deleteMenuItem(${i.menuItemId})" style="color: red;">Delete</button></td>
+                            </tr>
+                        `).join('');
+                    } else {
+                        document.getElementById('currentItemsBody').innerHTML = '<tr><td colspan="4">No items listed.</td></tr>';
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading restaurant info:', error);
+            }
+        }
+
+        // API call wrapper with token refresh
+        async function apiCall(url, method = 'GET', body = null) {
+            let token = sessionStorage.getItem(TOKEN_KEY);
+
+            // Check if token is expired
+            if (isTokenExpired(token)) {
+                const refreshed = await refreshToken();
+                if (!refreshed) {
+                    redirectToLogin('Session expired. Please login again.');
+                    return null;
+                }
+                token = sessionStorage.getItem(TOKEN_KEY);
+            }
+
+            const options = {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            };
+
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+
+            try {
+                const response = await fetch(url, options);
+
+                // If 401 Unauthorized, refresh token and retry
+                if (response.status === 401) {
+                    const refreshed = await refreshToken();
+                    if (refreshed) {
+                        token = sessionStorage.getItem(TOKEN_KEY);
+                        options.headers['Authorization'] = `Bearer ${token}`;
+                        return fetch(url, options).then(res => res.json());
+                    } else {
+                        redirectToLogin('Session expired. Please login again.');
+                        return null;
+                    }
+                }
+
+                if (response.ok) {
+                    const contentType = response.headers.get('content-type');
+                    const text = await response.text();
+                    if (contentType && contentType.includes('application/json')) {
+                        return text ? JSON.parse(text) : null;
+                    }
+                    return text; // Return as plain text if not JSON
+                } else {
+                    const text = await response.text();
+                    let errorData = { message: 'API Error' };
+                    try {
+                        if (text) errorData = JSON.parse(text);
+                    } catch (e) { }
+                    throw new Error(errorData.message || 'API Error');
+                }
+            } catch (error) {
+                console.error('API call error:', error);
+                throw error;
+            }
+        }
+
+        // Check if JWT token is expired
+        function isTokenExpired(token) {
+            if (!token) return true;
+            try {
+                const payload = JSON.parse(atob(token.split('.')[1]));
+                const expirationTime = payload.exp * 1000;
+                return Date.now() >= expirationTime;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        // Refresh JWT token
+        async function refreshToken() {
+            const refreshToken = sessionStorage.getItem(REFRESH_TOKEN_KEY);
+            if (!refreshToken) {
+                redirectToLogin('No refresh token found. Please login again.');
+                return false;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ refreshToken: refreshToken })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    sessionStorage.setItem(TOKEN_KEY, data.token);
+                    if (data.refreshToken) {
+                        sessionStorage.setItem(REFRESH_TOKEN_KEY, data.refreshToken);
+                    }
+                    return true;
+                } else {
+                    redirectToLogin('Session expired. Please login again.');
+                    return false;
+                }
+            } catch (error) {
+                console.error('Token refresh error:', error);
+                redirectToLogin('Error refreshing session. Please login again.');
+                return false;
+            }
+        }
+
+        // Initialize WebSocket for notifications
+        function initializeWebSocket() {
+            try {
+                const socket = new SockJS('http://localhost:8765/ws');
+                stompClient = Stomp.over(socket);
+
+                stompClient.connect({}, function () {
+                    console.log('Connected to notification server');
+
+                    // Subscribe to customer notifications
+                    stompClient.subscribe('/topic/customer/', function (message) {
+                        const notification = JSON.parse(message.body);
+
+                        // Specific filtering for the Owner:
+                        // 1. MUST NOT show FAILED or PAYMENT PROCESSING for NEW orders
+                        // 2. MUST allow all other status updates (CREATED, PREPARING, PREPARED, DELIVERING, DELIVERED, CANCELLED)
+                        //    as long as the payment isn't failed.
+                        const isNewOrder = !document.getElementById(`order-row-${notification.orderId || notification.id}`);
+                        const isFailed = notification.paymentStatus === 'FAILED' || notification.paymentStatus === 'PAYMENT PROCESSING';
+
+                        if (notification.restaurantId == restaurantId) {
+                            if (isNewOrder && isFailed) {
+                                // Ignore new failed/processing orders
+                                return;
+                            }
+
+                            // Otherwise, show notification and update/add to table
+                            showNotification(notification);
+                            addOrderToTable(notification);
+                        }
+                    });
+                }, function (error) {
+                    console.error('WebSocket connection error:', error);
+                });
+            } catch (error) {
+                console.error('Error initializing WebSocket:', error);
+            }
+        }
+
+        // Add or update order in table dynamically
+        function addOrderToTable(order) {
+            const table = document.getElementById('ordersTable');
+            const ordersSection = document.getElementById('ordersSection');
+
+            // If not viewing orders, we still update state if needed, but here we focus on UI
+            if (ordersSection.style.display === 'none') return;
+
+            const oId = order.orderId || order.id;
+            const itemsText = order.orderItemList ? order.orderItemList.map(i => `${i.itemName} (x${i.quantity})`).join(', ') : '';
+
+            let statusOptions = `
+                <select onchange="updateOrderStatus(${oId}, this.value)">
+                    <option value="">Select Action</option>
+                    <option value="PREPARING">Mark as Preparing</option>
+                    <option value="PREPARED">Mark as Prepared</option>
+                    <option value="DELIVERING">Assign Driver</option>
+                </select>
+            `;
+
+            if (order.status === 'CANCELLED' || order.status === 'DELIVERED' || order.status === 'DELIVERING') {
+                statusOptions = '-';
+            }
+
+            const assignedDriver = order.driverEmail || (order.driverName || (order.driver ? order.driver.email : 'Pending'));
+
+            const rowContent = `
+                <td>${oId}</td>
+                <td>${order.customerId}</td>
+                <td>${order.status}</td>
+                <td>${order.restaurantId}</td>
+                <td>$${order.amount}</td>
+                <td>${order.paymentStatus || 'N/A'}</td>
+                <td>${assignedDriver}</td>
+                <td>${itemsText}</td>
+                <td>${statusOptions}</td>
+            `;
+
+            // Check if row already exists
+            const existingRow = document.getElementById(`order-row-${oId}`);
+            if (existingRow) {
+                existingRow.innerHTML = rowContent;
+                // If the status has changed, you might want to highlight or do something here
+                return;
+            }
+
+            // Remove "No orders found" row if present
+            const firstRow = table.rows[1];
+            if (firstRow && firstRow.cells.length === 1 && firstRow.cells[0].innerText === 'No orders found') {
+                table.deleteRow(1);
+            }
+
+            // Insert at the top (index 1, after header)
+            const row = table.insertRow(1);
+            row.id = `order-row-${oId}`;
+            row.innerHTML = rowContent;
+        }
+
+        // Show notification (UPDATED fields)
+        function showNotification(notification) {
+            const notificationArea = document.getElementById('notificationArea');
+            const notificationContent = document.getElementById('notificationContent');
+
+            let content = `<strong>Order Update</strong><br>`;
+            content += `Order ID: ${notification.orderId}<br>`;
+            content += `Status: ${notification.status}<br>`;
+            content += `Customer ID: ${notification.customerId}<br>`;
+            content += `Restaurant ID: ${notification.restaurantId}<br>`;
+            content += `Total Amount: $${notification.amount}<br>`;
+            content += `Payment Status: ${notification.paymentStatus}<br>`;
+            if (notification.driverEmail) {
+                content += `Driver: ${notification.driverEmail}<br>`;
+            }
+            content += `<strong>Items:</strong><br>`;
+            // NotificationConsumer sends 'orderItemList' (same as RestaurantOrderInformationEvent)
+            if (notification.orderItemList && notification.orderItemList.length > 0) {
+                content += '<ul>' + notification.orderItemList.map(i => `<li>${i.itemName} (x${i.quantity}) - $${i.price}</li>`).join('') + '</ul>';
+            }
+
+            notificationContent.innerHTML = content;
+            notificationArea.style.display = 'block';
+        }
+
+        function closeNotification() {
+            document.getElementById('notificationArea').style.display = 'none';
+        }
+
+        // Update restaurant name
+        async function updateRestaurantName() {
+            const restaurantName = document.getElementById('restaurantName').value;
+            const messageDiv = document.getElementById('settingsMessage');
+
+            if (!restaurantName) {
+                messageDiv.innerHTML = '<span style="color: red;">Please enter a restaurant name</span>';
+                return;
+            }
+
+            try {
+                // Fixed: method to PUT and param name to 'email'
+                await apiCall(`${API_BASE_URL}/owner/updaterestaurantname/${restaurantName}?email=${ownerEmail}`, 'PUT');
+                messageDiv.innerHTML = '<span style="color: green;">Restaurant name updated successfully!</span>';
+
+                // Refresh top header
+                loadRestaurantInfo();
+            } catch (error) {
+                messageDiv.innerHTML = `<span style="color: red;">Error updating restaurant name: ${error.message}</span>`;
+            }
+        }
+
+        // Add menu item
+        async function addMenuItem() {
+            if (!restaurantId) {
+                alert('Restaurant ID not loaded. Please wait.');
+                return;
+            }
+
+            const menuItemId = document.getElementById('menuItemId').value;
+            const itemName = document.getElementById('itemName').value;
+            const itemPrice = document.getElementById('itemPrice').value;
+            const messageDiv = document.getElementById('itemMessage');
+
+            if (!menuItemId || !itemName || !itemPrice) {
+                messageDiv.innerHTML = '<span style="color: red;">Please fill all fields (ID, Name, and Price)</span>';
+                return;
+            }
+
+            try {
+                const menuItem = {
+                    menuItemId: parseInt(menuItemId),
+                    itemName: itemName,
+                    price: parseFloat(itemPrice)
+                };
+
+                // Fixed: Wrap menuItem in an array as backend expects List<RestaurantItem>
+                await apiCall(`${API_BASE_URL}/owner/additem/${restaurantId}`, 'POST', [menuItem]);
+                messageDiv.innerHTML = '<span style="color: green;">Item added successfully!</span>';
+                document.getElementById('menuItemId').value = '';
+                document.getElementById('itemName').value = '';
+                document.getElementById('itemPrice').value = '';
+
+                // Refresh list
+                loadRestaurantInfo();
+            } catch (error) {
+                messageDiv.innerHTML = `<span style="color: red;">Error adding item: ${error.message}</span>`;
+            }
+        }
+
+        // Delete menu item
+        async function deleteMenuItem(menuItemId) {
+            if (!confirm(`Are you sure you want to delete item ID: ${menuItemId}?`)) return;
+            try {
+                // Fixed: Use apiCall for better token management and consistency
+                await apiCall(`${API_BASE_URL}/owner/restaurant/deleteitem/${menuItemId}`, 'DELETE');
+                alert('Item deleted successfully!');
+                loadRestaurantInfo();
+            } catch (error) {
+                alert(`Error deleting item: ${error.message}`);
+            }
+        }
+
+        // Show settings section
+        function showSettings() {
+            document.getElementById('settingsSection').style.display = 'block';
+            document.getElementById('ordersSection').style.display = 'none';
+        }
+
+        // View orders
+        async function viewOrders() {
+            if (!restaurantId) {
+                alert('Restaurant ID not loaded. Please wait.');
+                return;
+            }
+
+            document.getElementById('settingsSection').style.display = 'none';
+            document.getElementById('ordersSection').style.display = 'block';
+
+            try {
+                const orders = await apiCall(`${API_BASE_URL}/owner/allorders/${restaurantId}`, 'GET');
+
+                const table = document.getElementById('ordersTable');
+                // Clear existing rows (keep header)
+                while (table.rows.length > 0) {
+                    table.deleteRow(0);
+                }
+
+                // Header
+                const header = table.insertRow();
+                header.innerHTML = `
+                    <th>Order ID</th>
+                    <th>Customer ID</th>
+                    <th>Status</th>
+                    <th>Rest. ID</th>
+                    <th>Total</th>
+                    <th>Payment</th>
+                    <th>Driver</th>
+                    <th>Items</th>
+                    <th>Action</th>`;
+
+                if (orders && Array.isArray(orders)) {
+                    orders.forEach(order => {
+                        addOrderToTable(order);
+                    });
+                } else {
+                    const row = table.insertRow();
+                    row.innerHTML = '<td colspan="9">No orders found</td>';
+                }
+            } catch (error) {
+                alert(`Error loading orders: ${error.message}`);
+            }
+        }
+
+        // Update order status
+        async function updateOrderStatus(orderId, action) {
+            if (!action) {
+                return;
+            }
+
+            let endpoint = '';
+            switch (action) {
+                case 'PREPARING':
+                    endpoint = `${API_BASE_URL}/owner/prepare/${orderId}`;
+                    break;
+                case 'PREPARED':
+                    endpoint = `${API_BASE_URL}/owner/prepared/${orderId}`;
+                    break;
+                case 'DELIVERING':
+                    endpoint = `${API_BASE_URL}/owner/orderdelivering/${orderId}`;
+                    break;
+                default:
+                    return;
+            }
+
+            try {
+                const result = await apiCall(endpoint, 'GET');
+                alert(`Order ${orderId} status updated to ${action}`);
+                // No need to call viewOrders() here because the WebSocket message 
+                // will trigger addOrderToTable() with more complete info (like driverEmail).
+            } catch (error) {
+                alert(`Error updating order status: ${error.message}`);
+            }
+        }
+
+        // Logout
+        function logout() {
+            if (confirm('Are you sure you want to logout?')) {
+                sessionStorage.clear();
+                if (stompClient) {
+                    stompClient.disconnect();
+                }
+                window.location.href = 'index.html';
+            }
+        }
+
+        // Redirect to login
+        function redirectToLogin(message) {
+            if (message) {
+                alert(message);
+            }
+            sessionStorage.clear();
+            window.location.href = 'index.html';
+        }
+    </script>
+</body>
+
+</html>

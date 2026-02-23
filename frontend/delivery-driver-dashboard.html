@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delivery Driver Dashboard - Multi-Vendor Delivery System</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+</head>
+
+<body>
+    <!-- Navigation -->
+    <div id="navbar" style="background-color: #f0f0f0; padding: 10px; border-bottom: 1px solid #ccc;">
+        <button onclick="viewAssignedOrders()" style="margin-right: 10px;">View Assigned Orders</button>
+        <button onclick="logout()" style="float: right;">Logout</button>
+        <span id="userInfo"></span>
+    </div>
+
+    <!-- Main Container -->
+    <div id="mainContent">
+        <!-- Orders Section -->
+        <div id="ordersSection">
+            <h2>Assigned Orders</h2>
+            <table id="ordersTable" border="1" style="width:100%; margin-top: 20px;">
+                <tr>
+                    <th>Order ID</th>
+                    <th>Restaurant ID</th>
+                    <th>Customer ID</th>
+                    <th>Status</th>
+                    <th>Total Amount</th>
+                    <th>Items</th>
+                    <th>Action</th>
+                </tr>
+            </table>
+            <div id="ordersMessage"></div>
+        </div>
+    </div>
+
+    <!-- Notification Area -->
+    <div id="notificationArea"
+        style="position: fixed; top: 20px; right: 20px; width: 300px; background-color: #f0f0f0; border: 1px solid #ccc; padding: 10px; border-radius: 5px; display:none; z-index: 1000;">
+        <h4>Notification</h4>
+        <div id="notificationContent"></div>
+        <button onclick="closeNotification()" style="margin-top: 10px;">Close</button>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8765/api/v1';
+        const TOKEN_KEY = 'jwtToken';
+        const REFRESH_TOKEN_KEY = 'refreshToken';
+        const USER_EMAIL_KEY = 'userEmail';
+        const USER_ROLE_KEY = 'userRole';
+        const DRIVER_ID_KEY = 'driverId';
+
+        let driverEmail = null;
+        let driverId = null;
+        let stompClient = null;
+
+        // Initialize on page load
+        window.addEventListener('load', function () {
+            checkTokenAndInitialize();
+        });
+
+        // Check token and initialize dashboard
+        function checkTokenAndInitialize() {
+            const token = sessionStorage.getItem(TOKEN_KEY);
+            const userRole = sessionStorage.getItem(USER_ROLE_KEY);
+            driverEmail = sessionStorage.getItem(USER_EMAIL_KEY);
+
+            if (!token || userRole !== 'DELIVERY_DRIVER') {
+                redirectToLogin();
+                return;
+            }
+
+            document.getElementById('userInfo').textContent = `Logged in as: ${driverEmail}`;
+
+            // Get driver ID
+            getDriverId();
+
+            // Initialize WebSocket for notifications
+            initializeWebSocket();
+
+            // Load assigned orders
+            viewAssignedOrders();
+        }
+
+        // Get driver ID from API
+        async function getDriverId() {
+            try {
+                const response = await apiCall(`${API_BASE_URL}/driver/getuserid/${driverEmail}`, 'GET');
+                if (response) {
+                    driverId = response.id || response.userId;
+                    sessionStorage.setItem(DRIVER_ID_KEY, driverId);
+                }
+            } catch (error) {
+                console.error('Error fetching driver ID:', error);
+            }
+        }
+
+        // API call wrapper with token refresh
+        async function apiCall(url, method = 'GET', body = null) {
+            let token = sessionStorage.getItem(TOKEN_KEY);
+
+            // Check if token is expired
+            if (isTokenExpired(token)) {
+                const refreshed = await refreshToken();
+                if (!refreshed) {
+                    redirectToLogin('Session expired. Please login again.');
+                    return null;
+                }
+                token = sessionStorage.getItem(TOKEN_KEY);
+            }
+
+            const options = {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            };
+
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+
+            try {
+                const response = await fetch(url, options);
+
+                // If 401 Unauthorized, refresh token and retry
+                if (response.status === 401) {
+                    const refreshed = await refreshToken();
+                    if (refreshed) {
+                        token = sessionStorage.getItem(TOKEN_KEY);
+                        options.headers['Authorization'] = `Bearer ${token}`;
+                        return fetch(url, options).then(res => res.json());
+                    } else {
+                        redirectToLogin('Session expired. Please login again.');
+                        return null;
+                    }
+                }
+
+                if (response.ok) {
+                    const contentType = response.headers.get('content-type');
+                    const text = await response.text();
+                    if (contentType && contentType.includes('application/json')) {
+                        return text ? JSON.parse(text) : null;
+                    }
+                    return text; // Return as plain text if not JSON
+                } else {
+                    const text = await response.text();
+                    let errorData = { message: 'API Error' };
+                    try {
+                        if (text) errorData = JSON.parse(text);
+                    } catch (e) { }
+                    throw new Error(errorData.message || 'API Error');
+                }
+            } catch (error) {
+                console.error('API call error:', error);
+                throw error;
+            }
+        }
+
+        // Check if JWT token is expired
+        function isTokenExpired(token) {
+            if (!token) return true;
+            try {
+                const payload = JSON.parse(atob(token.split('.')[1]));
+                const expirationTime = payload.exp * 1000;
+                return Date.now() >= expirationTime;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        // Refresh JWT token
+        async function refreshToken() {
+            const refreshToken = sessionStorage.getItem(REFRESH_TOKEN_KEY);
+            if (!refreshToken) {
+                redirectToLogin('No refresh token found. Please login again.');
+                return false;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ refreshToken: refreshToken })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    sessionStorage.setItem(TOKEN_KEY, data.token);
+                    if (data.refreshToken) {
+                        sessionStorage.setItem(REFRESH_TOKEN_KEY, data.refreshToken);
+                    }
+                    return true;
+                } else {
+                    redirectToLogin('Session expired. Please login again.');
+                    return false;
+                }
+            } catch (error) {
+                console.error('Token refresh error:', error);
+                redirectToLogin('Error refreshing session. Please login again.');
+                return false;
+            }
+        }
+
+        // Initialize WebSocket for notifications
+        function initializeWebSocket() {
+            try {
+                const socket = new SockJS('http://localhost:8765/ws');
+                stompClient = Stomp.over(socket);
+
+                stompClient.connect({}, function () {
+                    console.log('Connected to notification server');
+
+                    // Subscribe to customer notifications
+                    stompClient.subscribe('/topic/customer/', function (message) {
+                        const notification = JSON.parse(message.body);
+
+                        // ONLY show notifications for this driver AND only if order status is relevant (Assignment or Delivered)
+                        if (notification.driverEmail == driverEmail && (notification.status === 'DELIVERING' || notification.status === 'DELIVERED')) {
+                            showNotification(notification);
+                            updateOrderInTable(notification);
+                        }
+                    });
+                }, function (error) {
+                    console.error('WebSocket connection error:', error);
+                });
+            } catch (error) {
+                console.error('Error initializing WebSocket:', error);
+            }
+        }
+
+        // Add or update order in table dynamically
+        function updateOrderInTable(n) {
+            const table = document.getElementById('ordersTable');
+            const oId = n.orderId || n.id;
+
+            // Robustly check if assigned to this driver
+            const assignedEmail = n.driverEmail || (n.driver ? n.driver.email : '');
+            if (assignedEmail !== driverEmail) {
+                return; // Not for this driver
+            }
+
+            // Check if row already exists
+            let row = document.getElementById(`order-row-${oId}`);
+
+            // For driver dashboard, we show DELIVERING and DELIVERED rows
+            if (!row && (n.status === 'DELIVERING' || n.status === 'DELIVERED')) {
+                // Remove "No orders assigned" row if present
+                const firstRow = table.rows[1];
+                if (firstRow && firstRow.cells.length === 1 && firstRow.cells[0].innerText === 'No orders assigned') {
+                    table.deleteRow(1);
+                }
+
+                row = table.insertRow(1);
+                row.id = `order-row-${oId}`;
+                // Create placeholders cells
+                for (let i = 0; i < 7; i++) row.insertCell(i);
+            }
+
+            // Update existing row if found
+            if (row) {
+                const itemsText = n.orderItemList ? n.orderItemList.map(i => `${i.itemName} (x${i.quantity})`).join(', ') : '';
+
+                let actionHTML = '-';
+                if (n.status !== 'DELIVERED' && n.status !== 'CANCELLED') {
+                    actionHTML = `
+                        <button onclick="markAsDelivered(${oId})" style="margin-right: 5px;">Deliver</button>
+                        <button onclick="cancelDelivery(${oId})">Cancel Delivery</button>
+                    `;
+                }
+
+                row.cells[0].innerText = oId;
+                row.cells[1].innerText = n.restaurantId;
+                row.cells[2].innerText = n.customerId;
+                row.cells[3].innerText = n.status;
+                row.cells[4].innerText = `$${n.amount}`;
+                row.cells[5].innerText = itemsText;
+                row.cells[6].innerHTML = actionHTML;
+            }
+        }
+
+        // Show notification
+        function showNotification(notification) {
+            const notificationArea = document.getElementById('notificationArea');
+            const notificationContent = document.getElementById('notificationContent');
+
+            let content = `<strong>Order Assignment</strong><br>`;
+            content += `Order ID: ${notification.orderId}<br>`;
+            content += `Restaurant ID: ${notification.restaurantId}<br>`;
+            content += `Customer ID: ${notification.customerId}<br>`;
+            content += `Status: ${notification.status}<br>`;
+            content += `Total Amount: $${notification.amount}<br>`;
+            content += `Payment Status: ${notification.paymentStatus}<br>`;
+            content += `<strong>Items:</strong><br>`;
+            if (notification.orderItemList && notification.orderItemList.length > 0) {
+                notification.orderItemList.forEach(item => {
+                    content += `${item.itemName} (x${item.quantity}) - $${item.price}<br>`;
+                });
+            }
+
+            notificationContent.innerHTML = content;
+            notificationArea.style.display = 'block';
+        }
+
+        function closeNotification() {
+            document.getElementById('notificationArea').style.display = 'none';
+        }
+
+        // View assigned orders
+        async function viewAssignedOrders() {
+            try {
+                const rawOrders = await apiCall(`${API_BASE_URL}/driver/allorders`, 'GET');
+
+                // FILTER: Only show orders assigned to THIS driver
+                const orders = (rawOrders && Array.isArray(rawOrders))
+                    ? rawOrders.filter(o =>
+                        (o.status === 'DELIVERING' || o.status === 'DELIVERED') &&
+                        (o.driverEmail == driverEmail || (o.driver && o.driver.email == driverEmail))
+                    )
+                    : [];
+
+                const table = document.getElementById('ordersTable');
+                while (table.rows.length > 1) {
+                    table.deleteRow(1);
+                }
+
+                if (orders.length > 0) {
+                    orders.forEach(order => {
+                        const oId = order.orderId || order.id;
+                        const itemsText = order.orderItemList ? order.orderItemList.map(i => `${i.itemName} (x${i.quantity})`).join(', ') : '';
+                        const row = table.insertRow();
+                        row.id = `order-row-${oId}`;
+
+                        let actionHTML = '';
+                        if (order.status !== 'DELIVERED' && order.status !== 'CANCELLED') {
+                            actionHTML = `
+                                <button onclick="markAsDelivered(${oId})" style="margin-right: 5px;">Deliver</button>
+                                <button onclick="cancelDelivery(${oId})">Cancel Delivery</button>
+                            `;
+                        } else {
+                            actionHTML = '-';
+                        }
+
+                        row.innerHTML = `
+                            <td>${oId}</td>
+                            <td>${order.restaurantId}</td>
+                            <td>${order.customerId}</td>
+                            <td>${order.status}</td>
+                            <td>$${order.amount}</td>
+                            <td>${itemsText}</td>
+                            <td>${actionHTML}</td>
+                        `;
+                    });
+                } else {
+                    const row = table.insertRow();
+                    row.innerHTML = '<td colspan="7">No orders assigned</td>';
+                }
+            } catch (error) {
+                alert(`Error loading orders: ${error.message}`);
+            }
+        }
+
+        // Mark order as delivered
+        async function markAsDelivered(orderId) {
+            if (!confirm('Mark this order as delivered?')) {
+                return;
+            }
+
+            try {
+                await apiCall(`${API_BASE_URL}/driver/updatedeliveredorder/${orderId}`, 'GET');
+                alert('Order marked as delivered!');
+                viewAssignedOrders();
+            } catch (error) {
+                alert(`Error marking order as delivered: ${error.message}`);
+            }
+        }
+
+        // Cancel delivery and reassign to another driver
+        async function cancelDelivery(orderId) {
+            if (!confirm('Are you sure you want to cancel this delivery? It will be assigned to another driver.')) {
+                return;
+            }
+
+            try {
+                await apiCall(`${API_BASE_URL}/driver/deliverycancel/${orderId}`, 'GET');
+                alert('Delivery cancelled. Order will be assigned to another driver.');
+                viewAssignedOrders();
+            } catch (error) {
+                alert(`Error cancelling delivery: ${error.message}`);
+            }
+        }
+
+        // Logout
+        function logout() {
+            if (confirm('Are you sure you want to logout?')) {
+                sessionStorage.clear();
+                if (stompClient) {
+                    stompClient.disconnect();
+                }
+                window.location.href = 'index.html';
+            }
+        }
+
+        // Redirect to login
+        function redirectToLogin(message) {
+            if (message) {
+                alert(message);
+            }
+            sessionStorage.clear();
+            window.location.href = 'index.html';
+        }
+    </script>
+</body>
+
+</html>

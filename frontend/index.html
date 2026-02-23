@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Vendor Delivery System - Login/Signup</title>
+</head>
+
+<body>
+    <div id="container">
+        <div id="signup-form" style="display:none;">
+            <h2>Sign Up</h2>
+            <form id="signupForm">
+                <label>First Name:</label>
+                <input type="text" id="firstname" required><br><br>
+
+                <label>Last Name:</label>
+                <input type="text" id="lastname" required><br><br>
+
+                <label>Email:</label>
+                <input type="email" id="signupEmail" required><br><br>
+
+                <label>Phone Number:</label>
+                <input type="tel" id="signupPhone" required><br><br>
+
+                <label>City:</label>
+                <select id="signupCity" required>
+                    <option value="">Select City</option>
+                </select><br><br>
+
+                <div id="address-section">
+                    <h3>Address Details</h3>
+                    <label>Address Line 1:</label>
+                    <input type="text" id="signupAddress1" required><br><br>
+
+                    <label>Landmark:</label>
+                    <input type="text" id="signupLandmark"><br><br>
+
+                    <label>Pincode:</label>
+                    <input type="text" id="signupPincode" required><br><br>
+
+                    <label>State:</label>
+                    <input type="text" id="signupState" required><br><br>
+                </div>
+
+                <label>Password:</label>
+                <input type="password" id="signupPassword" required><br><br>
+
+                <label>Role:</label>
+                <select id="signupRole" required>
+                    <option value="">Select Role</option>
+                    <option value="CUSTOMER">Customer</option>
+                    <option value="DELIVERY_DRIVER">Delivery Driver</option>
+                    <option value="RESTAURANT_OWNER">Restaurant Owner</option>
+                </select><br><br>
+
+                <button type="submit">Sign Up</button>
+                <button type="button" onclick="toggleForms()">Already have an account? Login</button>
+            </form>
+            <div id="signupMessage"></div>
+        </div>
+
+        <div id="login-form">
+            <h2>Login</h2>
+            <form id="loginForm">
+                <label>Email:</label>
+                <input type="email" id="loginEmail" required><br><br>
+
+                <label>Password:</label>
+                <input type="password" id="loginPassword" required><br><br>
+
+                <button type="submit">Login</button>
+                <button type="button" onclick="toggleForms()">Don't have an account? Sign Up</button>
+            </form>
+            <div id="loginMessage"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8765/api/v1';
+        const TOKEN_KEY = 'jwtToken';
+        const REFRESH_TOKEN_KEY = 'refreshToken';
+        const USER_EMAIL_KEY = 'userEmail';
+        const USER_ROLE_KEY = 'userRole';
+        const USER_ID_KEY = 'userId';
+
+        // Check if user is already logged in
+        window.addEventListener('load', function () {
+            const token = sessionStorage.getItem(TOKEN_KEY);
+            const userRole = sessionStorage.getItem(USER_ROLE_KEY);
+
+            if (token && userRole) {
+                // Validate token before redirecting
+                if (!isTokenExpired(token)) {
+                    redirectToDashboard(userRole);
+                } else {
+                    // Token expired, clear session
+                    sessionStorage.clear();
+                }
+            }
+            loadCities();
+        });
+
+        let cityData = [];
+
+        async function loadCities() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/citieslist`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                cityData = await response.json();
+                const citySelect = document.getElementById('signupCity');
+
+                // Keep only the first "Select City" option
+                citySelect.innerHTML = '<option value="">Select City</option>';
+
+                if (Array.isArray(cityData)) {
+                    cityData.forEach(city => {
+                        const option = document.createElement('option');
+                        option.value = city.name;
+                        option.textContent = city.name;
+                        citySelect.appendChild(option);
+                    });
+                } else {
+                    console.error('Invalid cities response:', cityData);
+                }
+            } catch (error) {
+                console.error('Error loading cities:', error);
+            }
+        }
+
+        // Auto-populate state when city is selected
+        document.getElementById('signupCity').addEventListener('change', function () {
+            const selectedCityName = this.value;
+            const cityInfo = cityData.find(c => c.name === selectedCityName);
+            if (cityInfo) {
+                document.getElementById('signupState').value = cityInfo.state;
+            }
+        });
+
+        // Check if JWT token is expired
+        function isTokenExpired(token) {
+            if (!token) return true;
+            try {
+                const payload = JSON.parse(atob(token.split('.')[1]));
+                const expirationTime = payload.exp * 1000;
+                return Date.now() >= expirationTime;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        // Redirect to appropriate dashboard based on role
+        function redirectToDashboard(role) {
+            if (!role) {
+                alert('Error: User role could not be determined. Please try logging in again.');
+                window.location.href = 'index.html';
+                return;
+            }
+
+            // Normalize role (in case it has extra spaces or different casing)
+            role = String(role).trim().toUpperCase();
+
+            switch (role) {
+                case 'CUSTOMER':
+                    window.location.href = 'customer-dashboard.html';
+                    break;
+                case 'RESTAURANT_OWNER':
+                    window.location.href = 'restaurant-owner-dashboard.html';
+                    break;
+                case 'DELIVERY_DRIVER':
+                    window.location.href = 'delivery-driver-dashboard.html';
+                    break;
+                default:
+                    alert(`Error: Unknown role: ${role}. Please login again.`);
+                    console.error('Unknown role:', role);
+                    window.location.href = 'index.html';
+            }
+        }
+
+        // Toggle between signup and login forms
+        function toggleForms() {
+            const signupForm = document.getElementById('signup-form');
+            const loginForm = document.getElementById('login-form');
+
+            if (signupForm.style.display === 'none') {
+                signupForm.style.display = 'block';
+                loginForm.style.display = 'none';
+                document.getElementById('signupMessage').innerHTML = '';
+            } else {
+                signupForm.style.display = 'none';
+                loginForm.style.display = 'block';
+                document.getElementById('loginMessage').innerHTML = '';
+            }
+        }
+
+        // Handle signup
+        document.getElementById('signupForm').addEventListener('submit', async function (e) {
+            e.preventDefault();
+
+            const firstname = document.getElementById('firstname').value;
+            const lastname = document.getElementById('lastname').value;
+            const email = document.getElementById('signupEmail').value;
+            const phone = document.getElementById('signupPhone').value;
+            const city = document.getElementById('signupCity').value;
+            const password = document.getElementById('signupPassword').value;
+            const role = document.getElementById('signupRole').value;
+            const address1 = document.getElementById('signupAddress1').value;
+            const landmark = document.getElementById('signupLandmark').value;
+            const pincode = document.getElementById('signupPincode').value;
+            const state = document.getElementById('signupState').value;
+            const messageDiv = document.getElementById('signupMessage');
+
+            if (!firstname || !lastname || !email || !phone || !password || !role || !city || !address1 || !pincode || !state) {
+                messageDiv.innerHTML = '<span style="color: red;">All required fields must be filled</span>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/signup`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        firstname: firstname,
+                        lastname: lastname,
+                        email: email,
+                        phone: phone,
+                        password: password,
+                        role: role,
+                        cityDto: {
+                            name: city
+                        },
+                        address: [
+                            {
+                                addressLine1: address1,
+                                landmark: landmark,
+                                pincode: pincode,
+                                city: city,
+                                state: state,
+                                type: "HOME" // Default type
+                            }
+                        ]
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    messageDiv.innerHTML = '<span style="color: green;">Signup successful! Please login with your credentials.</span>';
+                    document.getElementById('signupForm').reset();
+                    setTimeout(() => toggleForms(), 2000);
+                } else {
+                    messageDiv.innerHTML = `<span style="color: red;">${data.message || 'Signup failed. Please try again.'}</span>`;
+                }
+            } catch (error) {
+                messageDiv.innerHTML = `<span style="color: red;">Error: ${error.message}</span>`;
+                console.error('Signup error:', error);
+            }
+        });
+
+        // Handle login
+        document.getElementById('loginForm').addEventListener('submit', async function (e) {
+            e.preventDefault();
+
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+            const messageDiv = document.getElementById('loginMessage');
+
+            if (!email || !password) {
+                messageDiv.innerHTML = '<span style="color: red;">Both email and password are required</span>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/signin`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        email: email,
+                        password: password
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Store tokens and user info
+                    sessionStorage.setItem(TOKEN_KEY, data.token);
+                    sessionStorage.setItem(REFRESH_TOKEN_KEY, data.refreshToken);
+                    sessionStorage.setItem(USER_EMAIL_KEY, email);
+
+                    // Robust role extraction from response or JWT token
+                    function extractRoleFromResponse(resp) {
+                        if (!resp) return null;
+                        // helper to extract from role-like object/array
+                        const pickFrom = (val) => {
+                            if (!val && val !== 0) return null;
+                            if (typeof val === 'string') return val;
+                            if (Array.isArray(val)) {
+                                if (val.length === 0) return null;
+                                const first = val[0];
+                                if (typeof first === 'string') return first;
+                                if (typeof first === 'object' && first !== null) return first.authority || first.name || first.role || first.roleName || null;
+                            }
+                            if (typeof val === 'object') {
+                                return val.authority || val.name || val.role || val.roleName || null;
+                            }
+                            return null;
+                        };
+
+                        // Try common fields in response
+                        let r = pickFrom(resp.role) || pickFrom(resp.roles) || pickFrom(resp.authorities) || pickFrom(resp.authority);
+                        // Some backends return user object
+                        if (!r && resp.user) {
+                            r = pickFrom(resp.user.role) || pickFrom(resp.user.roles) || pickFrom(resp.user.authorities) || pickFrom(resp.user.authority);
+                        }
+                        return r;
+                    }
+
+                    let userRole = extractRoleFromResponse(data);
+
+                    // If still not found, try decoding JWT token payload
+                    if (!userRole && data.token) {
+                        try {
+                            const payload = JSON.parse(atob(data.token.split('.')[1]));
+                            userRole = extractRoleFromResponse(payload) || extractRoleFromResponse(payload || {});
+                            // If payload.roles is array of strings/objects, pick first
+                            if (Array.isArray(payload.roles) && !userRole) {
+                                const first = payload.roles[0];
+                                if (typeof first === 'string') userRole = first;
+                                else if (typeof first === 'object') userRole = first.authority || first.name || first.role || null;
+                            }
+                        } catch (e) {
+                            console.error('Error decoding token:', e);
+                        }
+                    }
+
+                    // Normalize role to string
+                    if (userRole && typeof userRole !== 'string') {
+                        // attempt to convert object to string by picking common props
+                        userRole = userRole.authority || userRole.name || userRole.role || userRole.roleName || String(userRole);
+                    }
+
+                    if (userRole) {
+                        userRole = String(userRole).trim().toUpperCase();
+                        sessionStorage.setItem(USER_ROLE_KEY, userRole);
+                        messageDiv.innerHTML = '<span style="color: green;">Login successful! Redirecting...</span>';
+                        setTimeout(() => redirectToDashboard(userRole), 1000);
+                    } else {
+                        messageDiv.innerHTML = '<span style="color: red;">Login successful but role information missing. Please contact support.</span>';
+                        console.error('Login response (unable to extract role):', data);
+                    }
+                } else {
+                    messageDiv.innerHTML = `<span style="color: red;">${data.message || 'Login failed. Invalid credentials.'}</span>`;
+                }
+            } catch (error) {
+                messageDiv.innerHTML = `<span style="color: red;">Error: ${error.message}</span>`;
+                console.error('Login error:', error);
+            }
+        });
+    </script>
+</body>
+
+</html>
